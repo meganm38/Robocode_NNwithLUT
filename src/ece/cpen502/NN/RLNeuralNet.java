@@ -1,7 +1,6 @@
 package ece.cpen502.NN;
 
 import ece.cpen502.Interface.NeuralNetInterface;
-import ece.cpen502.LUT.LookupTable;
 import ece.cpen502.LUT.RobotAction;
 import ece.cpen502.LUT.RobotState;
 
@@ -10,18 +9,15 @@ import java.util.ArrayList;
 import java.util.Random;
 import java.util.Scanner;
 
-public class LUTNeuralNet implements NeuralNetInterface {
+public class RLNeuralNet implements NeuralNetInterface {
 
     private boolean isBinary; //true = binary training sets used, false = bipolar training sets
     private double learningRate, momentum;
     private int numHiddenNeurons;
 
     //hyper-parameters
-    private static double errorThreshold = 0.1;
-    private static int maxSteps = 2000;
     private static int numInputs = 7; //6 state categories + 1 action
     private static int numOutputs = 1;
-    private static int currentTrainingSet = 0;
 
     //upper and lower bounds for initializing weights
     private double weightMin = -0.5;
@@ -31,21 +27,15 @@ public class LUTNeuralNet implements NeuralNetInterface {
     private double[][] inputToHiddenWeights, hiddenToOutputWeights; //+1 to accommodate a bias weight
     private double[][] deltaWHiddenToOutput, deltaWInputToHidden;
 
-    //inputs
-    private double[][] inputVectors, expectedOutput;
-
     //for save and load
     private boolean areWeightsLoaded = false;
     private String separator = "break"; //used to separate multiple groups of weights when outputting/reading to/from a file
     private String savedOutputPath = "";
     private int saveOncePerNoOfEpochs = 50;
 
-    LUTNeuralNet(double[][] input, double[][] output,
-                 double lrnRate, double inputMomentum,
-                 int noOfHiddenNeurons, boolean isBinaryTraining,
-                 String progressOutputPath) {
-        inputVectors = input;
-        expectedOutput = output;
+    public RLNeuralNet(double lrnRate, double inputMomentum,
+                       int noOfHiddenNeurons, boolean isBinaryTraining,
+                       String progressOutputPath, String weightsFile) {
         learningRate = lrnRate;
         momentum = inputMomentum;
         numHiddenNeurons = noOfHiddenNeurons;
@@ -56,7 +46,9 @@ public class LUTNeuralNet implements NeuralNetInterface {
         hiddenToOutputWeights = new double[numHiddenNeurons + 1][numOutputs];
 
         deltaWHiddenToOutput = new double[numHiddenNeurons + 1][numOutputs];
-        deltaWInputToHidden = new double[inputVectors.length][numHiddenNeurons + 1];
+        deltaWInputToHidden = new double[numInputs + 1][numHiddenNeurons + 1];
+
+        load(weightsFile);
     }
 
     //Initialize weights to random values in the range [weightMin, weightMax]
@@ -87,7 +79,7 @@ public class LUTNeuralNet implements NeuralNetInterface {
     }
 
     //Forward propagation to calculate the outputs from the hidden neurons and the output neuron(s)
-    public double[] forwardToHidden() {
+    public double[] forwardToHidden(double[][] inputVectors, int actionID) {
         double[] outputsHidden = new double[numHiddenNeurons + 1];
         outputsHidden[0] = bias;
 
@@ -95,7 +87,7 @@ public class LUTNeuralNet implements NeuralNetInterface {
         for (int i = 1; i < outputsHidden.length; i++) {
             outputsHidden[i] = 0;
             for (int j = 0; j < inputToHiddenWeights.length; j++) {
-                outputsHidden[i] += inputVectors[currentTrainingSet][j] * inputToHiddenWeights[j][i];
+                outputsHidden[i] += inputVectors[actionID][j] * inputToHiddenWeights[j][i];
             }
             outputsHidden[i] = sigmoid(outputsHidden[i]);  //apply activation function
         }
@@ -115,20 +107,23 @@ public class LUTNeuralNet implements NeuralNetInterface {
         return outputs;
     }
 
-    public void backPropagation(double[] outputs, double[] outputsHidden) {
+    public void backPropagation(double[] state, int action, double Q) {
 
         double[] outputErrorSignals = new double[numOutputs];
         double[] hiddenErrorSignals = new double[numHiddenNeurons + 1];
 
+        double[] outputsHidden = forwardToHidden(adjustInputs(state), action);
+        double[] outputs = forwardProp(state);
+
         //compute the error signals at the outputs neurons
         if (isBinary) {
             for (int i = 0; i < outputs.length; i++) {
-                outputErrorSignals[i] = (expectedOutput[currentTrainingSet][i] - outputs[i]) *
+                outputErrorSignals[i] = (Q - outputs[i]) *
                         outputs[i] * (1 - outputs[i]);
             }
         } else {
             for (int i = 0; i < outputs.length; i++) {
-                outputErrorSignals[i] = (expectedOutput[currentTrainingSet][i] - outputs[i]) *
+                outputErrorSignals[i] = (Q - outputs[i]) *
                         (1 - outputs[i] * outputs[i]) * 0.5;
             }
         }
@@ -137,7 +132,7 @@ public class LUTNeuralNet implements NeuralNetInterface {
         for (int i = 0; i < hiddenToOutputWeights.length; i++) {
             for (int j = 0; j < hiddenToOutputWeights[i].length; j++) {
                 deltaWHiddenToOutput[i][j] = momentum * deltaWHiddenToOutput[i][j]
-                                            + learningRate * outputErrorSignals[j] * outputsHidden[i];
+                        + learningRate * outputErrorSignals[j] * outputsHidden[i];
                 hiddenToOutputWeights[i][j] += deltaWHiddenToOutput[i][j];
             }
         }
@@ -159,61 +154,89 @@ public class LUTNeuralNet implements NeuralNetInterface {
         for (int i = 0; i < inputToHiddenWeights.length; i++) {
             for (int j = 0; j < inputToHiddenWeights[i].length; j++) {
                 deltaWInputToHidden[i][j] = momentum * deltaWInputToHidden[i][j]
-                                            + learningRate * hiddenErrorSignals[j] * inputVectors[currentTrainingSet][i];
+                        + learningRate * hiddenErrorSignals[j] * adjustInputs(state)[action][i];
                 inputToHiddenWeights[i][j] += deltaWInputToHidden[i][j];
             }
         }
     }
 
-    public ArrayList train() {
-        double[] outputsHidden;
-        double[] outputs;
-        double error;
-        int numSuccessfulTraining = 0;
-        int avgTrainingEpochs = 0;
+    public double[][] adjustInputs(double[] state) {
+        //Normalize actions to range [-1,1]
+        double[] normalizedActions = new double[RobotAction.actionsCount];
+        for (int i = 0; i < RobotAction.actionsCount; i++) {
+            normalizedActions[i] = scaleRange(i,0,RobotAction.actionsCount-1, -1,1);
+        }
 
-        ArrayList<Double> errorList = null;
+        double[][] inputs = new double[RobotAction.actionsCount][numInputs + 1];
+        for (int j = 0; j < RobotAction.actionsCount; j++) {
+            double[] normalizedStates = normalizeStatesInputs(state,-1,1); //Normalize states inputs
+            inputs[j][0] = bias;
 
-        for (int trial = 0; trial < 10; trial ++) {
-            int epoch = 0;
-            errorList = new ArrayList<>();
-
-            if (!areWeightsLoaded) initializeWeights();
-
-            do {
-                currentTrainingSet = 0;
-                error = 0;
-
-                while (currentTrainingSet < inputVectors.length) {
-                    outputsHidden = forwardToHidden();
-                    outputs = forwardToOutput(outputsHidden);
-                    backPropagation(outputs, outputsHidden);
-
-                    for (int i = 0; i < outputs.length; i++) {
-                        error += Math.pow((outputs[i] - expectedOutput[currentTrainingSet][i]),2);
-                    }
-                    currentTrainingSet++;
-                }
-
-                if (savedOutputPath.length() > 0 && epoch % saveOncePerNoOfEpochs == 0) save(new File(savedOutputPath));
-
-                error = Math.sqrt(error / (RobotState.statesCount * RobotAction.actionsCount));
-                epoch++;
-                errorList.add(error);
-            } while (error > errorThreshold && maxSteps > epoch);
-
-            if (epoch < maxSteps) {
-                numSuccessfulTraining++;
-                avgTrainingEpochs += epoch;
-                System.out.println("Successful training with " + epoch + " number of epochs.");
-                System.out.println("The RMS error is " + error);
-            } else {
-                System.out.println("The number of epochs has exceeded "+ maxSteps +
-                        ". Unable to reduce the RMS error to below " + errorThreshold);
+            for (int k = 1; k < numInputs - 1; k++) {
+                inputs[j][k] = normalizedStates[k];
+            }
+            switch (j % RobotAction.actionsCount) {
+                case 0:
+                    inputs[j][numInputs-1] = normalizedActions[0];
+                    break;
+                case 1:
+                    inputs[j][numInputs-1] = normalizedActions[1];
+                    break;
+                case 2:
+                    inputs[j][numInputs-1] = normalizedActions[2];
+                    break;
+                case 3:
+                    inputs[j][numInputs-1] = normalizedActions[3];
+                    break;
+                case 4:
+                    inputs[j][numInputs-1] = normalizedActions[4];
+                    break;
+                case 5:
+                    inputs[j][numInputs-1] = normalizedActions[5];
+                    break;
             }
         }
-        System.out.println("On average, it takes " + avgTrainingEpochs / numSuccessfulTraining + " epochs to converge.");
-        return errorList;
+        return inputs;
+    }
+
+    /**
+     * Given a state, returns the q values for all 6 state action pairs
+     */
+    public double[] forwardProp(double[]state) {
+        double[] outputsHidden;
+        double[] outputs = new double[RobotAction.actionsCount];
+
+        double[][] inputs = adjustInputs(state);
+
+        if (!areWeightsLoaded) initializeWeights();
+        for (int i = 0; i < RobotAction.actionsCount; i++) {
+            outputsHidden = forwardToHidden(inputs, i);
+            outputs[i] = forwardToOutput(outputsHidden)[0];
+        }
+        return outputs;
+    }
+
+    public double getQ (double[] state, int actionID) {
+        double[] outputs = forwardProp(state);
+        return outputs[actionID];
+    }
+
+    public double getMaxQ(double[] state) {
+        double[] outputs = forwardProp(state);
+        return findMax(outputs);
+    }
+
+    public int getOptimalAction (double[] state) {
+        int optimalAction = -1;
+        double[] outputs = forwardProp(state);
+        double maxQ = getMaxQ(state);
+
+        for (int i = 0; i < outputs.length; i++) {
+            if (outputs[i] == maxQ) {
+                optimalAction = i;
+            }
+        }
+        return optimalAction;
     }
 
     public static void textWriter(String fileName, ArrayList<Double> list) throws IOException {
@@ -306,21 +329,21 @@ public class LUTNeuralNet implements NeuralNetInterface {
         }
     };
 
-    public static double[] normalizeStatesInputs(int[] statesInputs, double lowerBound, double upperBound) {
+    public static double[] normalizeStatesInputs(double[] statesInputs, double lowerBound, double upperBound) {
         double[] normalizedStates = new double[6];
         for(int i = 0; i < 6; i++) {
             switch (i) {
                 case 0: //enemy distance
-                    normalizedStates[0] = scaleRange(statesInputs[0],0,RobotState.numEnemyDistance-1,lowerBound,upperBound);
+                    normalizedStates[0] = scaleRange(statesInputs[0],0,1000,lowerBound,upperBound);
                     break;
                 case 1: //enemy bearing
-                    normalizedStates[1] = scaleRange(statesInputs[1],0,RobotState.numEnemyBearing-1,lowerBound,upperBound);
+                    normalizedStates[1] = scaleRange(statesInputs[1],-180,180,lowerBound,upperBound);
                     break;
                 case 2: //direction
-                    normalizedStates[2] = scaleRange(statesInputs[2],0,RobotState.numDirection-1,lowerBound,upperBound);
+                    normalizedStates[2] = scaleRange(statesInputs[2],0,360,lowerBound,upperBound);
                     break;
                 case 3: //energy
-                    normalizedStates[3] = scaleRange(statesInputs[3],0,RobotState.numEnergy-1,lowerBound,upperBound);
+                    normalizedStates[3] = scaleRange(statesInputs[3],0,RobotState.initialEnergy,lowerBound,upperBound);
                     break;
                 case 4: //hit wall
                     normalizedStates[4] = scaleRange(statesInputs[4],0,RobotState.numHitWall-1,lowerBound,upperBound);
@@ -359,7 +382,7 @@ public class LUTNeuralNet implements NeuralNetInterface {
     public static double findMax(double[] Array) {
         double max = Double.NEGATIVE_INFINITY;
         for (int i = 0; i < Array.length; i++) {
-                max = Math.max(Array[i], max);
+            max = Math.max(Array[i], max);
         }
         return max;
     }
@@ -389,68 +412,4 @@ public class LUTNeuralNet implements NeuralNetInterface {
     public double train(double[] X, double argValue) {
         return 0;
     }
-
-    public static void main(String[] args) throws IOException {
-        double learningRate = 0.1;
-        int noOfHiddenNeurons = 15;
-        double momentum = 0.3;
-
-        //Get LUT from assignment 2 and normalize to range [-1,1]
-        LookupTable lut = new LookupTable();
-        lut.load("LUT");
-        double[][] botExpectedOutputs = lut.getLutTable();
-        double[][] normExpectedOutputs = normalizeOutputs(botExpectedOutputs,-1,1);
-
-        double[][] expectedOutputsLUT = new double[RobotState.statesCount * RobotAction.actionsCount][numOutputs];
-        int counter = 0;
-        for (int i = 0; i < RobotState.statesCount; i++) {
-            for (int j = 0; j < RobotAction.actionsCount; j++) {
-                expectedOutputsLUT[counter][0] = normExpectedOutputs[i][j];
-                counter++;
-            }
-        }
-
-        //Normalize actions to range [-1,1]
-        double[] normalizedActions = new double[RobotAction.actionsCount];
-        for (int i = 0; i < RobotAction.actionsCount; i++) {
-            normalizedActions[i] = scaleRange(i,0,RobotAction.actionsCount-1, -1,1);
-        }
-
-        double[][] inputs = new double[RobotState.statesCount * RobotAction.actionsCount][numInputs + 1];
-        for (int j = 0; j < RobotState.statesCount * RobotAction.actionsCount; j++) {
-            int[]states = RobotState.getStates(j / RobotAction.actionsCount);
-            double[] normalizedStates = normalizeStatesInputs(states,-1,1); //Normalize states inputs
-            inputs[j][0] = bias;
-
-            for (int k = 1; k < numInputs - 1; k++) {
-                inputs[j][k] = normalizedStates[k];
-            }
-            switch (j % RobotAction.actionsCount) {
-                case 0:
-                    inputs[j][numInputs-1] = normalizedActions[0];
-                    break;
-                case 1:
-                    inputs[j][numInputs-1] = normalizedActions[1];
-                    break;
-                case 2:
-                    inputs[j][numInputs-1] = normalizedActions[2];
-                    break;
-                case 3:
-                    inputs[j][numInputs-1] = normalizedActions[3];
-                    break;
-                case 4:
-                    inputs[j][numInputs-1] = normalizedActions[4];
-                    break;
-                case 5:
-                    inputs[j][numInputs-1] = normalizedActions[5];
-                    break;
-            }
-        }
-
-        LUTNeuralNet lutTraining = new LUTNeuralNet(inputs, expectedOutputsLUT, learningRate, momentum,noOfHiddenNeurons,false, "LUTNN_Weights.txt");
-
-        ArrayList lutRMSError = lutTraining.train();
-        textWriter("lutRMSError.txt", lutRMSError);
-    }
 }
-

@@ -1,11 +1,13 @@
-package ece.cpen502.LUT;
+package ece.cpen502.LearningAgents;
 
 import ece.cpen502.Interface.CommonInterface;
+import ece.cpen502.LUT.LookupTable;
+import ece.cpen502.LUT.RobotAction;
 
 import java.io.File;
 import java.io.IOException;
 
-public class LearningAgent implements CommonInterface {
+public class LearningAgentLUT implements CommonInterface {
     public enum Algo{QLearn, Sarsa};
 
     private double learningRate = 0.2;
@@ -13,7 +15,7 @@ public class LearningAgent implements CommonInterface {
     public LookupTable lookupTable;
     private int prevState = -1, prevAction = -1;
 
-    public LearningAgent(LookupTable table) {
+    public LearningAgentLUT(LookupTable table) {
         this.lookupTable = table;
     }
 

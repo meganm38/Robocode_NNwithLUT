@@ -1,12 +1,11 @@
 package ece.cpen502.Robots;
 import ece.cpen502.LUT.*;
-import ece.cpen502.LearningAgents.LearningAgentLUT;
+import ece.cpen502.LearningAgents.LearningAgentNN;
 import robocode.*;
 import java.awt.*;
 import java.io.*;
 
-public class MyRobot extends AdvancedRobot {
-    private static LookupTable lut = new LookupTable();
+public class NNRobot extends AdvancedRobot {
     private final String fileToSaveName = "robotMiddleReward";
     private final String fileTerminalReward = "robotTerminalReward";
     // --------- game rounds record
@@ -16,14 +15,14 @@ public class MyRobot extends AdvancedRobot {
     private static int roundCount = 1;
     private static double epsilon = 0.9;
     // --------- state record
-    private int currentAction;
-    private int currentState;
-    private final LearningAgentLUT.Algo currentAlgo = LearningAgentLUT.Algo.QLearn;
+    private int actionTaken;
+    private double[] state;
+    private final LearningAgentNN.Algo currentAlgo = LearningAgentNN.Algo.QLearn;
 
     private int hasHitWall = 0;
     private int isHitByBullet = 0;
     // ---------- program components
-    private LearningAgentLUT agent;
+    private LearningAgentNN agent;
     private EnemyRobot enemyTank;
 
     // -------- reward
@@ -49,11 +48,11 @@ public class MyRobot extends AdvancedRobot {
         enemyTank = new EnemyRobot();
         RobotState.initialEnergy = this.getEnergy();
         // -------------------------------- Initialize reinforcement learning parts ------------------------------------
-        agent = new LearningAgentLUT(lut);
+        agent = new LearningAgentNN();
         // ------------------------------------------------ Run --------------------------------------------------------
         while (true) {
             selectRobotAction();
-            agent.train(currentState, currentAction, currentReward, currentAlgo);
+            agent.train(state, actionTaken, currentReward, currentAlgo);
             this.currentReward = 0;
             adjustAndFire();
         }
@@ -63,10 +62,10 @@ public class MyRobot extends AdvancedRobot {
      * selectRobotAction: select robot action based on robot current state
      */
     private void selectRobotAction(){
-        int state = getRobotState();
-        currentAction = agent.getAction(state, epsilon);
+        double[] stateBeforeAction = getRobotState();
+        actionTaken = agent.getAction(stateBeforeAction, epsilon);
         this.resetState(); // reset hitWall hitByBullet
-        switch(currentAction){
+        switch(actionTaken){
             case RobotAction.moveForward:
                 setAhead(RobotAction.moveDistance);
                 execute();
@@ -139,13 +138,13 @@ public class MyRobot extends AdvancedRobot {
         return Math.sqrt(Math.pow(xDiff, 2) + Math.pow(yDiff, 2));
     }
 
-    private int getRobotState(){
-        int curDistance = RobotState.calcDistanceState(enemyTank.distance);
-        int enemyBearing = RobotState.getEnemyBearing(enemyTank.bearing);
-        int curEnergy = RobotState.calcEnergyState(getEnergy());
-        int heading = RobotState.getDirection(getHeading());
-        currentState = RobotState.getStateIndex(curDistance, enemyBearing, heading, curEnergy, hasHitWall, isHitByBullet);
-        return currentState;
+    private double[] getRobotState(){
+        double curDistance = enemyTank.distance;
+        double enemyBearing = enemyTank.bearing;
+        double curEnergy = getEnergy();
+        double heading = getHeading();
+        state = new double[]{curDistance, enemyBearing, heading, curEnergy, hasHitWall, isHitByBullet};
+        return state;
     }
 
     private void resetState() {
@@ -224,7 +223,6 @@ public class MyRobot extends AdvancedRobot {
         totalNumRounds++;
         if (totalNumRounds % 1000 == 0) epsilon = epsilon > 0.05 ? epsilon - 0.05 : 0;
         System.out.println("total: " + totalNumRounds + ", epsilon:" + epsilon);
-        saveLUTData();
     }
 
 
@@ -232,13 +230,13 @@ public class MyRobot extends AdvancedRobot {
     public void onWin(WinEvent event) {
         currentReward += winReward;
         numWins++;
-        agent.train(currentState, currentAction, currentReward, currentAlgo);
+        agent.train(state, actionTaken, currentReward, currentAlgo);
     }
 
     @Override
     public void onDeath(DeathEvent event) {
         currentReward += loseReward;
-        agent.train(currentState, currentAction, currentReward, currentAlgo);
+        agent.train(state, actionTaken, currentReward, currentAlgo);
     }
 
     private void logOneRound(){
@@ -248,16 +246,6 @@ public class MyRobot extends AdvancedRobot {
         logFile.writeToFile(folderDst2, winRate, roundCount);
     }
 
-    public void saveLUTData() {
-        try
-        {
-            lut.save(getDataFile("LUT"));
-        }
-        catch (Exception e)
-        {
-            out.println("Exception trying to write: " + e);
-        }
-    }
 
 
 }
